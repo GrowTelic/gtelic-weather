@@ -46,6 +46,7 @@ Published on Pages: `weather/<id>.json` (feed), `weather/status.json` (last refr
     - `is_day`, from the coordinates.
     - `apparent_temperature`, derived from MET temperature, humidity and wind with the formula used for `current`.
     - `precipitation_probability`: MET's own value when the response contains it, otherwise `null`. The app shows "—" for `null`.
+  - The job requests MET's `complete` product by default. It has the same number of requests as `compact` and adds MET's `probability_of_precipitation` where MET provides it. Set `MET_PRODUCT=compact` to go back. A cache written by the other product gets one full request.
   - `hourly_meta` records the time zone, the number of hours, and whether MET provided a probability.
   - The existing keys `hourly.time` and `hourly.precipitation_probability` keep their names.
 - **Day and night:**
@@ -89,7 +90,7 @@ Notes:
 ```bash
 npm test
 ```
-Cases (27):
+Cases (29):
 - **Feed and caching:** `200` (live feed, attribution, User-Agent, 4-decimal coordinates); `304` with `If-Modified-Since`; `Expires` skip.
 - **Failures:** `500` (previous file kept); `503` with no previous file; broken body; `429` with retries exhausted, and `429` followed by success; `5xx` retried once; stale data; missing or placeholder contact.
 - **Sharing:** nearby properties share a request; different areas do not; the radius is configurable; different altitude or time zone never share; a new member is served from cache; `304` refreshes a whole group.

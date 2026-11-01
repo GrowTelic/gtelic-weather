@@ -31,6 +31,7 @@ const CFG = {
   backoffBaseMs: env('BACKOFF_BASE_MS', 30e3),
   maxBackoffMs: env('MAX_BACKOFF_MS', 300e3),
   retryDelayMs: env('RETRY_DELAY_MS', 2000),
+  product: process.env.MET_PRODUCT === 'compact' ? 'compact' : 'complete',   // 'complete' adds MET probability_of_precipitation where MET has it; same number of requests
   hourlyHours: Math.max(0, Math.min(60, env('HOURLY_HOURS', 48))),  // hourly steps kept in the feed (MET compact has hourly steps for about 2.5 days)                   // single retry after a 5xx or network error
 };
 
@@ -105,7 +106,8 @@ export function addDayNight(w, lat, lon) {
 // Only MET's hourly steps (entries with next_1_hours) are used; nothing is interpolated or invented.
 // time: local wall-clock time of the property ("YYYY-MM-DDTHH:mm", DST-correct through Intl); time_utc: the MET instant.
 // precipitation: next_1_hours precipitation_amount (mm). precipitation_probability: MET's probability_of_precipitation
-// when the response contains it, otherwise null (the compact product normally does not include it).
+// when the response contains it, otherwise null (the compact product does not include it; the default 'complete'
+// product includes it where MET has it).
 // apparent_temperature: derived from MET temperature, humidity and wind with the same formula as current (v1).
 export function localTime(t, tz) {
   const d = new Date(t);
@@ -129,7 +131,7 @@ export function addHourly(w, j, tz, lat, lon, hours = CFG.hourlyHours) {
     const pp = n1.details?.probability_of_precipitation; h.precipitation_probability.push(Number.isFinite(pp) ? Math.round(pp) : null);
   }
   w.hourly = h;
-  w.hourly_meta = { timezone: tz, hours: h.time.length, source: 'MET Norway Locationforecast 2.0 compact, next_1_hours', precipitation_probability_provided: h.precipitation_probability.some((v) => v !== null), apparent_temperature: 'derived from MET temperature, humidity and wind' };
+  w.hourly_meta = { timezone: tz, hours: h.time.length, source: `MET Norway Locationforecast 2.0 ${CFG.product}, next_1_hours`, precipitation_probability_provided: h.precipitation_probability.some((v) => v !== null), apparent_temperature: 'derived from MET temperature, humidity and wind' };
   return w;
 }
 
@@ -231,9 +233,10 @@ export async function run(cfg = CFG) {
   async function fetchGroup(g) {
     const p = g.leader;
     // A cached file from before the hourly series existed cannot be refreshed by Expires or a 304 (no body): one full request.
-    const old = g.cache && g.cache.hourly_meta ? g.cache : null;
+    // A different MET product (e.g. compact -> complete) also needs one full request, since a 304 would keep the old fields.
+    const old = g.cache && g.cache.hourly_meta && (g.cache._met?.product || 'compact') === cfg.product ? g.cache : null;
     if (old?._met?.expires && Date.now() < old._met.expires) { await writeAll(g, old, true); set(g, { result: 'fresh-skipped' }); return; } // respect Expires
-    const url = `${BASE}/weatherapi/locationforecast/2.0/compact?lat=${(+p.lat).toFixed(4)}&lon=${(+p.lon).toFixed(4)}${alt(p) === null ? '' : '&altitude=' + alt(p)}`;
+    const url = `${BASE}/weatherapi/locationforecast/2.0/${cfg.product}?lat=${(+p.lat).toFixed(4)}&lon=${(+p.lon).toFixed(4)}${alt(p) === null ? '' : '&altitude=' + alt(p)}`;
     const headers = { 'User-Agent': UA, Accept: 'application/json' };
     if (old?._met?.lastModified) headers['If-Modified-Since'] = old._met.lastModified;
     let n429 = 0, retried = false;
@@ -263,7 +266,7 @@ export async function run(cfg = CFG) {
       addHourly(w, j, tz, +p.lat, +p.lon, cfg.hourlyHours);
       w.generated = new Date().toISOString();
       w.source = { name: 'MET Norway', license: 'CC BY 4.0', licenseUrl: 'https://api.met.no/doc/License', modified: true };
-      w._met = { lastModified: r.headers.get('Last-Modified') || null, expires: exp || Date.now() + 1800e3 };
+      w._met = { product: cfg.product, lastModified: r.headers.get('Last-Modified') || null, expires: exp || Date.now() + 1800e3 };
       await writeAll(g, addDayNight(w, +p.lat, +p.lon));
       set(g, { result: 'updated', http: r.status, warning: r.status === 203 ? 'HTTP 203: MET marks this product version as deprecated' : undefined });
       return;

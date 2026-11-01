@@ -33,7 +33,7 @@ async function scenario({ handler, properties = [FIRA], previous = {}, env = {} 
 }
 
 const ok200 = (req, res) => { res.writeHead(200, { 'content-type': 'application/json', 'last-modified': LAST_MOD, expires: new Date(Date.now() + 1800e3).toUTCString() }); res.end(JSON.stringify(metSample())); };
-const previousFeed = (ageHours, extra = {}) => ({ hourly_meta: { hours: 0 }, live: true, fictional: false, current: { temperature_2m: 19, apparent_temperature: 19, weather_code: 1, wind_speed_10m: 10 }, daily: { time: ['2026-11-01'], weather_code: [1], temperature_2m_max: [20], temperature_2m_min: [15], precipitation_probability_max: [0] }, generated: new Date(Date.now() - ageHours * 3600e3).toISOString(), source: { name: 'MET Norway' }, _met: { lastModified: LAST_MOD, expires: Date.now() - 60e3 }, ...extra });
+const previousFeed = (ageHours, extra = {}) => ({ hourly_meta: { hours: 0 }, live: true, fictional: false, current: { temperature_2m: 19, apparent_temperature: 19, weather_code: 1, wind_speed_10m: 10 }, daily: { time: ['2026-11-01'], weather_code: [1], temperature_2m_max: [20], temperature_2m_min: [15], precipitation_probability_max: [0] }, generated: new Date(Date.now() - ageHours * 3600e3).toISOString(), source: { name: 'MET Norway' }, _met: { product: 'complete', lastModified: LAST_MOD, expires: Date.now() - 60e3 }, ...extra });
 
 test('200: writes a live feed with attribution, identifies itself, requests 4-decimal Fira coordinates', async () => {
   const s = await scenario({ handler: ok200 });
@@ -45,7 +45,7 @@ test('200: writes a live feed with attribution, identifies itself, requests 4-de
     assert.deepEqual(w.source, { name: 'MET Norway', license: 'CC BY 4.0', licenseUrl: 'https://api.met.no/doc/License', modified: true });
     assert.equal(w._met.lastModified, LAST_MOD);
     assert.ok(Date.now() - Date.parse(w.generated) < 60e3);
-    assert.equal(s.requests[0].url, '/weatherapi/locationforecast/2.0/compact?lat=36.4167&lon=25.4319');
+    assert.equal(s.requests[0].url, '/weatherapi/locationforecast/2.0/complete?lat=36.4167&lon=25.4319');
     assert.equal(s.requests[0].headers['user-agent'], 'GTelic/1.0 ops@gtelic.test');
     assert.equal(s.status.ok, true); assert.equal(s.status.properties[0].result, 'updated');
   } finally { await s.cleanup(); }
@@ -66,7 +66,7 @@ test('304: sends If-Modified-Since equal to the previous Last-Modified and keeps
 });
 
 test('Expires still in the future: no request is sent', async () => {
-  const s = await scenario({ previous: { 'aegean-pearl-demo': previousFeed(0.2, { _met: { lastModified: LAST_MOD, expires: Date.now() + 600e3 } }) }, handler: ok200 });
+  const s = await scenario({ previous: { 'aegean-pearl-demo': previousFeed(0.2, { _met: { product: 'complete', lastModified: LAST_MOD, expires: Date.now() + 600e3 } }) }, handler: ok200 });
   try {
     assert.equal(s.requests.length, 0); assert.equal(s.code, 0);
     assert.equal(s.status.properties[0].result, 'fresh-skipped');
@@ -177,7 +177,7 @@ test('conditions: different altitude or time zone never share; altitude is sent 
 });
 
 test('a new property joining a group with a still-valid cache gets a copy without any request', async () => {
-  const cached = { ...previousFeed(0.2), _met: { lastModified: LAST_MOD, expires: Date.now() + 600e3, requestKey: '36.4167,25.4319' } };
+  const cached = { ...previousFeed(0.2), _met: { product: 'complete', lastModified: LAST_MOD, expires: Date.now() + 600e3, requestKey: '36.4167,25.4319' } };
   const s = await scenario({ properties: [FIRA, near('new-neighbour', 0.2, 0)], previous: { 'aegean-pearl-demo': cached }, handler: ok200 });
   try {
     assert.equal(s.requests.length, 0); assert.equal(s.code, 0);
@@ -186,7 +186,7 @@ test('a new property joining a group with a still-valid cache gets a copy withou
 });
 
 test('304 for a shared group refreshes every member, including one without a file', async () => {
-  const cached = { ...previousFeed(1), _met: { lastModified: LAST_MOD, expires: Date.now() - 1, requestKey: '36.4167,25.4319' } };
+  const cached = { ...previousFeed(1), _met: { product: 'complete', lastModified: LAST_MOD, expires: Date.now() - 1, requestKey: '36.4167,25.4319' } };
   const s = await scenario({ properties: [FIRA, near('joiner', 0.2, 0)], previous: { 'aegean-pearl-demo': cached }, handler: (req, res) => { res.writeHead(304); res.end(); } });
   try {
     assert.equal(s.requests.length, 1); assert.equal(s.requests[0].headers['if-modified-since'], LAST_MOD); assert.equal(s.code, 0);
@@ -321,10 +321,21 @@ test('hourly: a 304 keeps the hourly series of the last valid feed', async () =>
 });
 
 test('format upgrade: a cached file without the hourly series triggers one full request despite Expires', async () => {
-  const legacy = { ...previousFeed(0.2, { _met: { lastModified: LAST_MOD, expires: Date.now() + 600e3 } }) }; delete legacy.hourly_meta;
+  const legacy = { ...previousFeed(0.2, { _met: { product: 'complete', lastModified: LAST_MOD, expires: Date.now() + 600e3 } }) }; delete legacy.hourly_meta;
   const s = await scenario({ previous: { 'aegean-pearl-demo': legacy }, handler: ok200 });
   try {
     assert.equal(s.requests.length, 1); assert.equal(s.requests[0].headers['if-modified-since'], undefined, 'no conditional request: a 304 would carry no hourly data');
     assert.equal((await s.read('aegean-pearl-demo.json')).hourly.time.length, 48);
   } finally { await s.cleanup(); }
+});
+
+test('product switch: a cache from the compact product gets one full request; MET_PRODUCT=compact still works', async () => {
+  const compactCache = { ...previousFeed(0.2), _met: { lastModified: LAST_MOD, expires: Date.now() + 600e3 } }; // no product = compact
+  const s = await scenario({ previous: { 'aegean-pearl-demo': compactCache }, handler: ok200 });
+  const c = await scenario({ handler: ok200, env: { MET_PRODUCT: 'compact' } });
+  try {
+    assert.equal(s.requests.length, 1); assert.equal(s.requests[0].headers['if-modified-since'], undefined);
+    assert.match(s.requests[0].url, /\/2\.0\/complete\?/); assert.equal((await s.read('aegean-pearl-demo.json'))._met.product, 'complete');
+    assert.match(c.requests[0].url, /\/2\.0\/compact\?/);
+  } finally { await s.cleanup(); await c.cleanup(); }
 });
