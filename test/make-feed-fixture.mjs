@@ -7,7 +7,8 @@ const { metSample } = await import('./met-sample.mjs');
 const ageHours = +(process.argv[2] || 0);
 const at = process.argv[3] ? new Date(process.argv[3]) : new Date();  // optional ISO time, e.g. a night hour
 const w = addDayNight(convert(metSample(at), 'Europe/Athens'), 36.4167, 25.4319);
-w.generated = new Date(Date.now() - ageHours * 3600e3).toISOString();
+const base = process.argv[3] ? at.getTime() : Date.now(); // with a fixed time, age is relative to it
+w.generated = new Date(base - ageHours * 3600e3).toISOString();
 w.source = { name: 'MET Norway', license: 'CC BY 4.0', licenseUrl: 'https://api.met.no/doc/License', modified: true };
 w._met = { lastModified: new Date().toUTCString(), expires: Date.now() + 1800e3 };
 process.stdout.write(JSON.stringify(w));
