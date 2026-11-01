@@ -7,7 +7,8 @@
 // Added for scale: nearby properties share one request (conservative radius, same time zone, similar altitude),
 // request-level Expires / If-Modified-Since / 304 reuse, a global request interval, Retry-After and exponential
 // backoff on 429, one retry on 5xx/network errors, a run-time budget with oldest-data-first ordering, status.json,
-// and day/night data (current.is_day, daily sunrise/sunset) computed from the coordinates.
+// day/night data (current.is_day, daily sunrise/sunset) computed from the coordinates, and an hourly series
+// (next 48 h by default) taken from the same MET response.
 // All limits below are this job's own conservative defaults, not official MET Norway limits.
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -29,7 +30,8 @@ const CFG = {
   max429Retries: env('MAX_429_RETRIES', 2),
   backoffBaseMs: env('BACKOFF_BASE_MS', 30e3),
   maxBackoffMs: env('MAX_BACKOFF_MS', 300e3),
-  retryDelayMs: env('RETRY_DELAY_MS', 2000),                   // single retry after a 5xx or network error
+  retryDelayMs: env('RETRY_DELAY_MS', 2000),
+  hourlyHours: Math.max(0, Math.min(60, env('HOURLY_HOURS', 48))),  // hourly steps kept in the feed (MET compact has hourly steps for about 2.5 days)                   // single retry after a 5xx or network error
 };
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -96,6 +98,38 @@ export function addDayNight(w, lat, lon) {
   const st = w.daily.time.map((k) => sunTimes(lat, lon, k));
   w.daily.sunrise = st.map((s) => s.sunrise);
   w.daily.sunset = st.map((s) => s.sunset);
+  return w;
+}
+
+// ---- Hourly forecast from the same MET response (no extra request) ----
+// Only MET's hourly steps (entries with next_1_hours) are used; nothing is interpolated or invented.
+// time: local wall-clock time of the property ("YYYY-MM-DDTHH:mm", DST-correct through Intl); time_utc: the MET instant.
+// precipitation: next_1_hours precipitation_amount (mm). precipitation_probability: MET's probability_of_precipitation
+// when the response contains it, otherwise null (the compact product normally does not include it).
+// apparent_temperature: derived from MET temperature, humidity and wind with the same formula as current (v1).
+export function localTime(t, tz) {
+  const d = new Date(t);
+  const ymd = d.toLocaleDateString('en-CA', { timeZone: tz });
+  const hm = d.toLocaleTimeString('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).replace(/^24/, '00');
+  return `${ymd}T${hm}`;
+}
+export function addHourly(w, j, tz, lat, lon, hours = CFG.hourlyHours) {
+  const ts = (j?.properties?.timeseries || []).filter((x) => x?.data?.next_1_hours && x?.data?.instant?.details).slice(0, hours);
+  const h = { time: [], time_utc: [], temperature_2m: [], apparent_temperature: [], weather_code: [], is_day: [], wind_speed_10m: [], precipitation: [], precipitation_probability: [] };
+  for (const x of ts) {
+    const i = x.data.instant.details, n1 = x.data.next_1_hours;
+    const T = i.air_temperature, ws = i.wind_speed ?? null, rh = i.relative_humidity ?? null;
+    h.time.push(localTime(x.time, tz)); h.time_utc.push(x.time);
+    h.temperature_2m.push(Number.isFinite(T) ? Math.round(T) : null);
+    if (Number.isFinite(T) && Number.isFinite(ws) && Number.isFinite(rh)) { const e = rh / 100 * 6.105 * Math.exp(17.27 * T / (237.7 + T)); h.apparent_temperature.push(Math.round(T + 0.33 * e - 0.7 * ws - 4)); } else h.apparent_temperature.push(null);
+    h.weather_code.push(n1.summary?.symbol_code ? code(n1.summary.symbol_code) : null);
+    h.is_day.push(isDay(lat, lon, Date.parse(x.time) + 1800e3));
+    h.wind_speed_10m.push(Number.isFinite(ws) ? Math.round(ws * 3.6) : null);
+    const pa = n1.details?.precipitation_amount; h.precipitation.push(Number.isFinite(pa) ? pa : null);
+    const pp = n1.details?.probability_of_precipitation; h.precipitation_probability.push(Number.isFinite(pp) ? Math.round(pp) : null);
+  }
+  w.hourly = h;
+  w.hourly_meta = { timezone: tz, hours: h.time.length, source: 'MET Norway Locationforecast 2.0 compact, next_1_hours', precipitation_probability_provided: h.precipitation_probability.some((v) => v !== null), apparent_temperature: 'derived from MET temperature, humidity and wind' };
   return w;
 }
 
@@ -222,7 +256,9 @@ export async function run(cfg = CFG) {
       }
       if (r.status >= 500 && !retried && cfg.retryDelayMs >= 0) { retried = true; await sleep(cfg.retryDelayMs); continue; }
       if (!r.ok) throw Object.assign(new Error('HTTP ' + r.status), { http: r.status });
-      const w = convert(await r.json(), p.tz || 'Europe/Athens'); if (!w) throw new Error('empty forecast');
+      const j = await r.json(), tz = p.tz || 'Europe/Athens';
+      const w = convert(j, tz); if (!w) throw new Error('empty forecast');
+      addHourly(w, j, tz, +p.lat, +p.lon, cfg.hourlyHours);
       w.generated = new Date().toISOString();
       w.source = { name: 'MET Norway', license: 'CC BY 4.0', licenseUrl: 'https://api.met.no/doc/License', modified: true };
       w._met = { lastModified: r.headers.get('Last-Modified') || null, expires: exp || Date.now() + 1800e3 };

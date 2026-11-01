@@ -246,3 +246,76 @@ test('day/night from coordinates: Fira noon is day, Fira 22:00 is night; feed ca
   const s = await scenario({ handler: ok200 });
   try { const w = await s.read('aegean-pearl-demo.json'); assert.ok([0, 1].includes(w.current.is_day)); assert.equal(w.daily.sunrise.length, 5); assert.equal(w.daily.sunset.length, 5); } finally { await s.cleanup(); }
 });
+
+// ---------- Hourly forecast (same MET response) ----------
+test('hourly: 48 real MET hourly steps; values taken from MET; rain probability null when MET does not provide it', async () => {
+  const sample = metSample();
+  const s = await scenario({ handler: (req, res) => { res.writeHead(200, { 'content-type': 'application/json', 'last-modified': LAST_MOD }); res.end(JSON.stringify(sample)); } });
+  try {
+    assert.equal(s.requests.length, 1, 'no extra request for hourly data');
+    const w = await s.read('aegean-pearl-demo.json'), h = w.hourly, ts = sample.properties.timeseries;
+    assert.equal(h.time.length, 48);
+    for (const k of ['time', 'time_utc', 'temperature_2m', 'apparent_temperature', 'weather_code', 'is_day', 'wind_speed_10m', 'precipitation', 'precipitation_probability']) assert.equal(h[k].length, 48, k);
+    for (let i = 0; i < 48; i++) {
+      assert.equal(h.time_utc[i], ts[i].time);
+      assert.equal(h.temperature_2m[i], Math.round(ts[i].data.instant.details.air_temperature));
+      assert.equal(h.wind_speed_10m[i], Math.round(ts[i].data.instant.details.wind_speed * 3.6));
+      assert.equal(h.precipitation[i], ts[i].data.next_1_hours.details.precipitation_amount);
+      assert.equal(h.precipitation_probability[i], null);
+    }
+    assert.equal(h.precipitation[10], 0.4); assert.equal(h.weather_code[10], 61);
+    assert.equal(w.hourly_meta.precipitation_probability_provided, false);
+    assert.equal(w.hourly_meta.timezone, 'Europe/Athens');
+  } finally { await s.cleanup(); }
+});
+
+test('hourly: MET probability_of_precipitation is passed through when present; HOURLY_HOURS=24 limits the series', async () => {
+  const sample = metSample(new Date(), { probability: true });
+  const s = await scenario({ handler: (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(sample)); } , env: { HOURLY_HOURS: '24' } });
+  try {
+    const h = (await s.read('aegean-pearl-demo.json')).hourly;
+    assert.equal(h.time.length, 24);
+    assert.deepEqual(h.precipitation_probability, sample.properties.timeseries.slice(0, 24).map((x) => x.data.next_1_hours.details.probability_of_precipitation));
+  } finally { await s.cleanup(); }
+});
+
+test('hourly: Santorini local time with summer/winter time, including the October switch', async () => {
+  process.env.MET_CONTACT ||= 'ops@gtelic.test';
+  const { localTime } = await import('../fetch-weather.mjs');
+  assert.equal(localTime('2027-06-14T12:00:00Z', 'Europe/Athens'), '2027-06-14T15:00');  // EEST +3
+  assert.equal(localTime('2026-12-01T12:00:00Z', 'Europe/Athens'), '2026-12-01T14:00');  // EET +2
+  assert.equal(localTime('2026-10-25T00:00:00Z', 'Europe/Athens'), '2026-10-25T03:00');  // last hour of summer time
+  assert.equal(localTime('2026-10-25T01:00:00Z', 'Europe/Athens'), '2026-10-25T03:00');  // clocks went back: 03:00 again
+  assert.equal(localTime('2026-03-29T00:00:00Z', 'Europe/Athens'), '2026-03-29T02:00');
+  assert.equal(localTime('2026-03-29T01:00:00Z', 'Europe/Athens'), '2026-03-29T04:00');  // 03:00 skipped in spring
+  assert.equal(localTime('2026-11-01T21:00:00Z', 'Europe/Athens'), '2026-11-01T23:00');
+  assert.equal(localTime('2026-11-01T22:00:00Z', 'Europe/Athens'), '2026-11-02T00:00');  // midnight rolls the date
+});
+
+test('hourly: day/night per hour from the coordinates', async () => {
+  const sample = metSample(new Date('2026-11-01T12:00:00Z'));
+  const s = await scenario({ handler: (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(sample)); } });
+  try {
+    const h = (await s.read('aegean-pearl-demo.json')).hourly;
+    const at = (utc) => h.is_day[h.time_utc.indexOf(utc)];
+    assert.equal(at('2026-11-01T12:00:00Z'), 1);   // 14:00 Athens
+    assert.equal(at('2026-11-01T20:00:00Z'), 0);   // 22:00 Athens
+    assert.equal(at('2026-11-02T03:00:00Z'), 0);   // 05:00 Athens, before sunrise
+  } finally { await s.cleanup(); }
+});
+
+test('hourly: no hourly steps in the MET response -> empty series, nothing invented', async () => {
+  const sample = metSample(); for (const x of sample.properties.timeseries) delete x.data.next_1_hours;
+  const s = await scenario({ handler: (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(sample)); } });
+  try {
+    const w = await s.read('aegean-pearl-demo.json');
+    assert.equal(w.hourly.time.length, 0); assert.equal(w.hourly.precipitation_probability.length, 0);
+    assert.equal(w.hourly_meta.hours, 0); assert.equal(w.daily.time.length, 5, 'daily still built from 6-hour steps');
+  } finally { await s.cleanup(); }
+});
+
+test('hourly: a 304 keeps the hourly series of the last valid feed', async () => {
+  const prev = { ...previousFeed(1), hourly: { time: ['2026-11-01T22:00'], time_utc: ['2026-11-01T20:00:00Z'], temperature_2m: [18], apparent_temperature: [17], weather_code: [0], is_day: [0], wind_speed_10m: [12], precipitation: [0], precipitation_probability: [null] } };
+  const s = await scenario({ previous: { 'aegean-pearl-demo': prev }, handler: (req, res) => { res.writeHead(304); res.end(); } });
+  try { assert.deepEqual((await s.read('aegean-pearl-demo.json')).hourly, prev.hourly); } finally { await s.cleanup(); }
+});

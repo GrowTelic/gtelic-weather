@@ -111,6 +111,29 @@ jobs:
       - id: deploy
         uses: actions/deploy-pages@v4
 
+      - name: Verify the published feed (real HTTP from the runner)
+        env:
+          PAGE_URL: ${{ steps.deploy.outputs.page_url }}
+        run: |
+          node -e '
+            const fs = require("fs"), ids = require("./properties.json").map(p => p.id).slice(0, 3);
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+            (async () => {
+              for (const id of ids) {
+                let local; try { local = JSON.parse(fs.readFileSync(`public/weather/${id}.json`, "utf8")); } catch { console.log(`${id}: no file in this run`); continue; }
+                let pub = null;
+                for (let i = 0; i < 12 && !(pub && pub.generated === local.generated); i++) {
+                  try { const r = await fetch(new URL(`weather/${id}.json?v=${Date.now()}`, process.env.PAGE_URL)); if (r.ok) pub = await r.json(); } catch {}
+                  if (!(pub && pub.generated === local.generated)) await sleep(10000);
+                }
+                if (!pub || pub.generated !== local.generated) { console.log(`::error::${id}: the published file does not match this run`); process.exitCode = 1; continue; }
+                const h = pub.hourly || {}, n = (h.time || []).length;
+                console.log(`${id}: live=${pub.live} fictional=${pub.fictional} source=${pub.source && pub.source.name} generated=${pub.generated} current=${pub.current.temperature_2m} is_day=${pub.current.is_day} days=${pub.daily.time.length} hourly=${n} probability_provided=${pub.hourly_meta && pub.hourly_meta.precipitation_probability_provided}`);
+                console.log("first hours:", JSON.stringify((h.time || []).slice(0, 4).map((t, i) => ({ t, temp: h.temperature_2m[i], feels: h.apparent_temperature[i], code: h.weather_code[i], day: h.is_day[i], wind: h.wind_speed_10m[i], mm: h.precipitation[i], pop: h.precipitation_probability[i] }))));
+                if (!pub.live || n === 0) { console.log(`::error::${id}: published feed has no live hourly data`); process.exitCode = 1; }
+              }
+            })();'
+
       - name: Fail the run when any property failed or is stale
         if: steps.fetch.outputs.code != '0'
         run: |

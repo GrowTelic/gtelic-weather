@@ -38,9 +38,20 @@ Published on Pages: `weather/<id>.json` (feed), `weather/status.json` (last refr
   - The previous data (from the Actions cache, or the published file on the first run) is restored before fetching. On any error that data stays and is republished.
   - Nothing is invented. A property with no data has no file, and the app shows its demo weather.
   - Files of properties removed from `properties.json` are deleted from the site.
+- **Hourly forecast (same MET response, no extra request):**
+  - `hourly` contains the next `HOURLY_HOURS` (default 48, at most about 60) **hourly** steps that MET provides (`next_1_hours`). Nothing is interpolated.
+  - Fields:
+    - `time`: Santorini local wall-clock time, summer/winter time correct.
+    - `time_utc`, `temperature_2m`, `weather_code`, `wind_speed_10m` (km/h), `precipitation` (mm, MET).
+    - `is_day`, from the coordinates.
+    - `apparent_temperature`, derived from MET temperature, humidity and wind with the formula used for `current`.
+    - `precipitation_probability`: MET's own value when the response contains it, otherwise `null`. The app shows "—" for `null`.
+  - `hourly_meta` records the time zone, the number of hours, and whether MET provided a probability.
+  - The existing keys `hourly.time` and `hourly.precipitation_probability` keep their names.
 - **Day and night:**
   - `current.is_day` is computed from the coordinates and time (solar elevation).
   - `daily.sunrise` and `daily.sunset` are computed per day (UTC; `null` during polar day or night), so the app can decide day or night at viewing time.
+- **Published-feed check:** after each deploy, the workflow downloads the published JSON over real HTTP, checks that it is this run's file and that it has live hourly data, and logs a sample.
 - **Monitoring:**
   - `status.json` holds totals and, for each property: group, result, HTTP status, data age and a stale flag.
   - The run **fails** (red, with GitHub's failure email) when any property failed, was throttled, or its data is older than `STALE_ALERT_HOURS` (default 3 h). Deferred properties fail the run only once their data is stale.
@@ -78,11 +89,12 @@ Notes:
 ```bash
 npm test
 ```
-Cases (21):
+Cases (27):
 - **Feed and caching:** `200` (live feed, attribution, User-Agent, 4-decimal coordinates); `304` with `If-Modified-Since`; `Expires` skip.
 - **Failures:** `500` (previous file kept); `503` with no previous file; broken body; `429` with retries exhausted, and `429` followed by success; `5xx` retried once; stale data; missing or placeholder contact.
 - **Sharing:** nearby properties share a request; different areas do not; the radius is configurable; different altitude or time zone never share; a new member is served from cache; `304` refreshes a whole group.
 - **Scale:** 2,000 properties; the run-time budget defers groups and serves them first next time; staggered requests.
 - **Day and night:** Fira noon is day and 22:00 is night; sunrise and sunset; polar night.
+- **Hourly:** 48 MET hourly values with a null probability; probability passed through when present; `HOURLY_HOURS=24`; local time including both DST switches and midnight; day/night per hour; no hourly steps means an empty series; `304` keeps the hourly series.
 
 `npm run feed-fixture [ageHours] [ISO time]` prints a feed file exactly as the job writes it. The Guest App tests use it.
