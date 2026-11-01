@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Weather feed check</title>
+<body style="font:16px system-ui;margin:20px;max-width:560px"><h1>Weather feed</h1><p id="o">Loading…</p><h2 style="font-size:18px">Last refresh</h2><p id="st">Loading…</p>
+<p style="font-size:13px;color:#555">Weather data from <a href="https://api.met.no/doc/License">MET Norway</a> (CC BY 4.0), processed and converted for the GTelic Guest App.</p>
+<script>
+// Check page from GTelic Guest App Approved v1 (weather-job/public/index.html), extended with the refresh status.
+const id=new URLSearchParams(location.search).get('id')||'aegean-pearl-demo';
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+fetch('weather/'+encodeURIComponent(id)+'.json',{cache:'no-cache'}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(j=>{const age=((Date.now()-Date.parse(j.generated))/36e5).toFixed(1);o.innerHTML=`<b>${esc(id)}</b><br>Updated: ${esc(j.generated)} (${esc(age)} h ago${age>12?', <b>older than 12 h: the app shows demo weather</b>':''})<br>Now: ${esc(j.current.temperature_2m)}° (feels ${esc(j.current.apparent_temperature)}°), wind ${esc(j.current.wind_speed_10m)} km/h<br>Days: ${esc(j.daily.time.join(', '))}<br>Source: ${esc(j.source.name)} (${esc(j.source.license)})`}).catch(e=>o.textContent='No file yet or error: '+e.message);
+fetch('weather/status.json',{cache:'no-cache'}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(s=>{st.innerHTML=`${s.ok?'OK':'<b style="color:#B00">FAILED or STALE</b>'} · checked ${esc(s.checkedAt)}<br>`+s.properties.map(p=>`${esc(p.id)}: ${esc(p.result)}${p.http?' (HTTP '+esc(p.http)+')':''}${p.error?' · '+esc(p.error):''}${p.stale?' · stale':''}`).join('<br>')}).catch(e=>st.textContent='No status yet: '+e.message);
+</script>

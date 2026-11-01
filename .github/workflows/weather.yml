@@ -1,0 +1,118 @@
+# NEW workflow for the separate gtelic-weather repository. It is NOT the lost original weather.yml of
+# Approved v1 (SHA-256 1649ba92... in CHECKSUMS.txt); it was written for this repository on 2026-11-01.
+# While this folder sits inside gtelic-saas it never runs: GitHub only runs workflows from the repository root.
+name: Refresh and publish weather
+
+on:
+  schedule:
+    - cron: '7 * * * *'   # hourly at minute 7 (UTC); GitHub may start scheduled runs a few minutes late
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: weather
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55   # MAX_RUNTIME_MS (default 40 min) stops new requests well before this
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Unit tests (local mock of MET; no network)
+        run: npm test
+
+      - name: Check configuration
+        env:
+          MET_CONTACT: ${{ vars.MET_CONTACT }}
+        run: |
+          if [ -z "$MET_CONTACT" ]; then
+            echo "::error::Repository variable MET_CONTACT is not set (contact email or website for the MET Norway User-Agent)."
+            exit 1
+          fi
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Restore previous data (cache of the last run)
+        uses: actions/cache/restore@v4
+        with:
+          path: public/weather
+          key: weather-${{ github.run_id }}
+          restore-keys: weather-
+
+      - name: Fill gaps from the published site, drop files of removed properties
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          mkdir -p public/weather
+          node -e "const ids=new Set(require('./properties.json').map(p=>p.id)); const fs=require('fs');
+            for (const f of fs.readdirSync('public/weather')) { if (f.endsWith('.json') && f!=='status.json' && !ids.has(f.slice(0,-5))) { fs.rmSync('public/weather/'+f); console.log('removed', f); } }
+            fs.writeFileSync('/tmp/missing.txt', [...ids].filter(id=>!fs.existsSync('public/weather/'+id+'.json')).join('\n'));"
+          if [ -s /tmp/missing.txt ]; then
+            # parallel, bounded: only on the first run or after cache eviction
+            xargs -P 8 -I{} sh -c 'curl -fsS --retry 2 -o "public/weather/{}.json" "$BASE_URL/weather/{}.json" && echo "restored {}" || { rm -f "public/weather/{}.json"; echo "no published file for {}"; }' < /tmp/missing.txt
+          fi
+
+      - name: Fetch MET Norway Locationforecast
+        id: fetch
+        env:
+          MET_CONTACT: ${{ vars.MET_CONTACT }}
+          # Optional tuning through repository variables; empty means the job's conservative defaults.
+          MIN_INTERVAL_MS: ${{ vars.MIN_INTERVAL_MS }}
+          CONCURRENCY: ${{ vars.CONCURRENCY }}
+          SHARE_RADIUS_KM: ${{ vars.SHARE_RADIUS_KM }}
+          SHARE_MAX_ALT_DIFF_M: ${{ vars.SHARE_MAX_ALT_DIFF_M }}
+          STALE_ALERT_HOURS: ${{ vars.STALE_ALERT_HOURS }}
+          MAX_RUNTIME_MS: ${{ vars.MAX_RUNTIME_MS }}
+        run: |
+          set +e
+          node fetch-weather.mjs
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "2" ]; then exit 2; fi
+          exit 0
+
+      - name: Save data for the next run
+        if: always() && hashFiles('public/weather/status.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: public/weather
+          key: weather-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Job summary
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            let s; try { s = JSON.parse(fs.readFileSync("public/weather/status.json", "utf8")); } catch { console.log("No status.json produced."); process.exit(0); }
+            const bad = s.properties.filter(p => p.error || p.stale);
+            const shown = (bad.length ? bad : s.properties).slice(0, 50);
+            const rows = shown.map(p => `| ${p.id} | ${p.group}${p.shared ? " (" + p.shared + ")" : ""} | ${p.result} | ${p.http ?? ""} | ${p.dataGenerated ?? "none"} | ${p.dataAgeHours ?? ""} | ${p.stale ? "yes" : "no"} | ${(p.error || p.warning || "").replace(/\|/g, "/")} |`);
+            console.log([`## Weather refresh: ${s.ok ? "OK" : "FAILED or STALE"}`, `Checked ${s.checkedAt}; stale after ${s.staleAlertHours} h.`, "", "Totals: " + JSON.stringify(s.summary), "", bad.length ? `Problems (first ${shown.length} of ${bad.length}):` : `Properties (first ${shown.length}):`, "",
+              "| Property | Group | Result | HTTP | Data generated | Age (h) | Stale | Error |", "|---|---|---|---|---|---|---|---|", ...rows].join("\n"));
+          ' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Fail the run when any property failed or is stale
+        if: steps.fetch.outputs.code != '0'
+        run: |
+          echo "::error::Weather refresh failed or data is stale for at least one property. Previous data was kept and republished; see the job summary and weather/status.json."
+          exit 1

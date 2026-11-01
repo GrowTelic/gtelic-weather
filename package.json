@@ -1,0 +1,13 @@
+{
+  "name": "gtelic-weather",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hourly MET Norway Locationforecast feed for the GTelic Guest App, published as static JSON on GitHub Pages.",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test test/fetch-weather.test.mjs",
+    "fetch": "node fetch-weather.mjs",
+    "feed-fixture": "node test/make-feed-fixture.mjs"
+  }
+}
