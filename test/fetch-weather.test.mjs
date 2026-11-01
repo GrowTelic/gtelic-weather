@@ -33,7 +33,7 @@ async function scenario({ handler, properties = [FIRA], previous = {}, env = {} 
 }
 
 const ok200 = (req, res) => { res.writeHead(200, { 'content-type': 'application/json', 'last-modified': LAST_MOD, expires: new Date(Date.now() + 1800e3).toUTCString() }); res.end(JSON.stringify(metSample())); };
-const previousFeed = (ageHours, extra = {}) => ({ live: true, fictional: false, current: { temperature_2m: 19, apparent_temperature: 19, weather_code: 1, wind_speed_10m: 10 }, daily: { time: ['2026-11-01'], weather_code: [1], temperature_2m_max: [20], temperature_2m_min: [15], precipitation_probability_max: [0] }, generated: new Date(Date.now() - ageHours * 3600e3).toISOString(), source: { name: 'MET Norway' }, _met: { lastModified: LAST_MOD, expires: Date.now() - 60e3 }, ...extra });
+const previousFeed = (ageHours, extra = {}) => ({ hourly_meta: { hours: 0 }, live: true, fictional: false, current: { temperature_2m: 19, apparent_temperature: 19, weather_code: 1, wind_speed_10m: 10 }, daily: { time: ['2026-11-01'], weather_code: [1], temperature_2m_max: [20], temperature_2m_min: [15], precipitation_probability_max: [0] }, generated: new Date(Date.now() - ageHours * 3600e3).toISOString(), source: { name: 'MET Norway' }, _met: { lastModified: LAST_MOD, expires: Date.now() - 60e3 }, ...extra });
 
 test('200: writes a live feed with attribution, identifies itself, requests 4-decimal Fira coordinates', async () => {
   const s = await scenario({ handler: ok200 });
@@ -318,4 +318,13 @@ test('hourly: a 304 keeps the hourly series of the last valid feed', async () =>
   const prev = { ...previousFeed(1), hourly: { time: ['2026-11-01T22:00'], time_utc: ['2026-11-01T20:00:00Z'], temperature_2m: [18], apparent_temperature: [17], weather_code: [0], is_day: [0], wind_speed_10m: [12], precipitation: [0], precipitation_probability: [null] } };
   const s = await scenario({ previous: { 'aegean-pearl-demo': prev }, handler: (req, res) => { res.writeHead(304); res.end(); } });
   try { assert.deepEqual((await s.read('aegean-pearl-demo.json')).hourly, prev.hourly); } finally { await s.cleanup(); }
+});
+
+test('format upgrade: a cached file without the hourly series triggers one full request despite Expires', async () => {
+  const legacy = { ...previousFeed(0.2, { _met: { lastModified: LAST_MOD, expires: Date.now() + 600e3 } }) }; delete legacy.hourly_meta;
+  const s = await scenario({ previous: { 'aegean-pearl-demo': legacy }, handler: ok200 });
+  try {
+    assert.equal(s.requests.length, 1); assert.equal(s.requests[0].headers['if-modified-since'], undefined, 'no conditional request: a 304 would carry no hourly data');
+    assert.equal((await s.read('aegean-pearl-demo.json')).hourly.time.length, 48);
+  } finally { await s.cleanup(); }
 });

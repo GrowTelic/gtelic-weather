@@ -229,7 +229,9 @@ export async function run(cfg = CFG) {
   let stopped = null, requests = 0, cursor = 0;
 
   async function fetchGroup(g) {
-    const p = g.leader, old = g.cache;
+    const p = g.leader;
+    // A cached file from before the hourly series existed cannot be refreshed by Expires or a 304 (no body): one full request.
+    const old = g.cache && g.cache.hourly_meta ? g.cache : null;
     if (old?._met?.expires && Date.now() < old._met.expires) { await writeAll(g, old, true); set(g, { result: 'fresh-skipped' }); return; } // respect Expires
     const url = `${BASE}/weatherapi/locationforecast/2.0/compact?lat=${(+p.lat).toFixed(4)}&lon=${(+p.lon).toFixed(4)}${alt(p) === null ? '' : '&altitude=' + alt(p)}`;
     const headers = { 'User-Agent': UA, Accept: 'application/json' };
